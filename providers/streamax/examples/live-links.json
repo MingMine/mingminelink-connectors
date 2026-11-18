@@ -1,0 +1,10 @@
+{
+  "data": [
+    {
+      "channel": 1,
+      "session": "test-session-live-0001",
+      "url": "https://media.example.invalid/live/test-session-live-0001.flv"
+    }
+  ],
+  "requestId": "TEST-REQUEST-0002"
+}

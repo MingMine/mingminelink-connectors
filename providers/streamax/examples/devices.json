@@ -1,0 +1,16 @@
+{
+  "data": [
+    {
+      "uniqueId": "TEST00000001",
+      "fleetId": "900000000000000001",
+      "onlineState": "ONLINE",
+      "dormantState": "AWAKE",
+      "channels": "1,2",
+      "deviceType": "TEST-DEVICE",
+      "lanWan": "PUBLIC_NETWORK"
+    }
+  ],
+  "page": 1,
+  "pageSize": 20,
+  "requestId": "TEST-REQUEST-0001"
+}
