@@ -21,6 +21,7 @@ import type {
   Channel,
   LiveSession,
   PlaybackSession,
+  StreamaxStoreType,
   VideoSource,
 } from "./types";
 
@@ -31,8 +32,10 @@ export const PLAYBACK_LINK_TTL_SECONDS = 20;
 
 type JsonRecord = Record<string, unknown>;
 
-/** 锐明支持的直播协议。 */
+/** 锐明支持的流媒体协议（streamingProtocol）。 */
 export type StreamaxLiveProtocol = "FLV" | "HLS" | "RTMP" | "RTSP";
+
+export type { StreamaxStoreType };
 
 /** 适配层初始化参数。 */
 export interface StreamaxAdapterOptions {
@@ -75,8 +78,12 @@ export interface VideoSourcePage {
 export interface ListAlarmsOptions {
   page?: number;
   pageSize?: number;
-  /** 按视频源过滤；锐明侧对应 uniqueId。 */
-  videoSourceId?: string;
+  /** 告警查询开始时间，RFC 3339，锐明必填。 */
+  startTime: string;
+  /** 告警查询结束时间，RFC 3339，锐明必填。 */
+  endTime: string;
+  /** 按视频源过滤；锐明侧对应 uniqueIds，多个值用逗号拼接。 */
+  videoSourceIds?: string[];
 }
 
 export interface AlarmPage {
@@ -101,12 +108,14 @@ export interface CreatePlaybackSessionOptions {
   startTime: string;
   /** RFC 3339，必须晚于 startTime。 */
   endTime: string;
-  /** 0 主存储，1 灾备存储。 */
-  storeType: 0 | 1;
+  /** 锐明字符串枚举 MAIN_STORAGE / SUB_STORAGE，不是 0/1。 */
+  storeType: StreamaxStoreType;
+  /** 默认 FLV；锐明要求显式传 streamingProtocol。 */
+  protocol?: StreamaxLiveProtocol;
 }
 
 export interface CloseSessionOptions {
-  videoSourceId: string;
+  /** 锐明 CloseVideoV2ReqDTO 只要求 session。 */
   sessionId: string;
 }
 
@@ -180,7 +189,7 @@ function mapVideoSource(raw: JsonRecord, requestId: string): VideoSource {
     id,
     fleetId: stringValue(raw.fleetId) ?? "",
     online: stringValue(raw.onlineState) === "ONLINE",
-    dormant: stringValue(raw.dormantState) === "ASLEEP",
+    dormant: stringValue(raw.dormantState) === "DORMANT",
     channels: parseStreamaxChannels(raw.channels).map((channelId) => ({
       id: channelId,
       videoSourceId: id,
@@ -306,9 +315,10 @@ export class StreamaxAdapter {
   /** 申请直播地址；地址一次性、10 秒有效，不得缓存。 */
   async createLiveSession(options: CreateLiveSessionOptions): Promise<LiveSession> {
     const protocol = options.protocol ?? "FLV";
+    // 锐明 2.7.3-P3：参数名为 channels 与 streamingProtocol。
     const params = new URLSearchParams({
-      channel: String(options.channelId),
-      protocol,
+      channels: String(options.channelId),
+      streamingProtocol: protocol,
     });
     const { body, requestId } = await this.request(
       `/openapi/v2/devices/${encodeURIComponent(options.videoSourceId)}/live-links?${params.toString()}`,
@@ -320,21 +330,23 @@ export class StreamaxAdapter {
       sessionId: requireString(link, "session", "直播地址", requestId),
       videoSourceId: options.videoSourceId,
       channelId: numberValue(link.channel) ?? options.channelId,
-      protocol: stringValue(link.protocol) ?? protocol,
+      protocol,
       url: requireString(link, "url", "直播地址", requestId),
       ...expiry,
     };
   }
 
-  /** 申请回放地址；地址一次性、20 秒有效，storeType 必传。 */
+  /** 申请回放地址；地址一次性、20 秒有效，storeType 与 streamingProtocol 必传。 */
   async createPlaybackSession(
     options: CreatePlaybackSessionOptions,
   ): Promise<PlaybackSession> {
+    const protocol = options.protocol ?? "FLV";
     const params = new URLSearchParams({
-      channel: String(options.channelId),
+      channels: String(options.channelId),
       startTime: options.startTime,
       endTime: options.endTime,
-      storeType: String(options.storeType),
+      storeType: options.storeType,
+      streamingProtocol: protocol,
     });
     const { body, requestId } = await this.request(
       `/openapi/v2/devices/${encodeURIComponent(options.videoSourceId)}/playback-links?${params.toString()}`,
@@ -349,19 +361,22 @@ export class StreamaxAdapter {
       url: requireString(link, "url", "回放地址", requestId),
       startTime: stringValue(link.startTime) ?? options.startTime,
       endTime: stringValue(link.endTime) ?? options.endTime,
-      storeType: numberValue(link.storeType) ?? options.storeType,
+      // 规格响应不含 storeType，回填请求参数。
+      storeType: options.storeType,
       ...expiry,
     };
   }
 
-  /** 告警列表；按视频源过滤时映射为锐明 uniqueId。 */
-  async listAlarms(options: ListAlarmsOptions = {}): Promise<AlarmPage> {
+  /** 告警列表；startTime / endTime 必填，按视频源过滤时映射为锐明 uniqueIds。 */
+  async listAlarms(options: ListAlarmsOptions): Promise<AlarmPage> {
     const params = new URLSearchParams({
       page: String(options.page ?? 1),
       pageSize: String(options.pageSize ?? 20),
+      startTime: options.startTime,
+      endTime: options.endTime,
     });
-    if (options.videoSourceId !== undefined && options.videoSourceId !== "") {
-      params.set("uniqueId", options.videoSourceId);
+    if (options.videoSourceIds !== undefined && options.videoSourceIds.length > 0) {
+      params.set("uniqueIds", options.videoSourceIds.join(","));
     }
 
     const { body, requestId } = await this.request(`/openapi/v2/alarms?${params.toString()}`);
@@ -378,11 +393,11 @@ export class StreamaxAdapter {
     };
   }
 
-  /** 关闭直播或回放会话；锐明通过 session 停止播放。 */
+  /** 关闭直播或回放会话；锐明 CloseVideoV2ReqDTO 只要求 session。 */
   async closeSession(options: CloseSessionOptions): Promise<CloseSessionResult> {
     const { body, requestId } = await this.request("/openapi/v2/devices/session-close", {
       method: "POST",
-      body: { uniqueId: options.videoSourceId, session: options.sessionId },
+      body: { session: options.sessionId },
     });
     const data = asRecord(body.data);
     return { closed: data?.closed === true, requestId };

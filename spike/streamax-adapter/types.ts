@@ -7,6 +7,9 @@
  * 3. 正式类型以 V0.1 RFC 批准的 OpenAPI / MCP schema 为准。
  */
 
+/** 锐明 2.7.3-P3 存储类型（storeType），字符串枚举，不是 0/1。 */
+export type StreamaxStoreType = "MAIN_STORAGE" | "SUB_STORAGE";
+
 /** 视频源：草案，待 RFC。锐明侧对应设备（device.uniqueId）。 */
 export interface VideoSource {
   /** 视频源标识；锐明侧取 device.uniqueId。 */
@@ -15,7 +18,7 @@ export interface VideoSource {
   fleetId: string;
   /** 设备是否在线；锐明侧 onlineState === "ONLINE"。 */
   online: boolean;
-  /** 设备是否休眠；锐明侧 dormantState === "ASLEEP"。 */
+  /** 设备是否休眠；锐明侧 dormantState === "DORMANT"（枚举 AWAKE/DORMANT/UNKNOWN）。 */
   dormant: boolean;
   /** 通道列表；由锐明 channels 逗号字符串拆分而来。 */
   channels: Channel[];
@@ -57,8 +60,8 @@ export interface PlaybackSession {
   startTime: string;
   /** 回放结束时间，RFC 3339。 */
   endTime: string;
-  /** 存储类型；锐明侧 0 为主存储、1 为灾备存储。 */
-  storeType: number;
+  /** 存储类型；锐明侧字符串枚举 MAIN_STORAGE / SUB_STORAGE。 */
+  storeType: StreamaxStoreType;
   expiresAt: string;
   /** 有效期秒数；回放默认 20 秒。 */
   expiresInSeconds: number;

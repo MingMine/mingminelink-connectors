@@ -23,13 +23,13 @@ HTTP 调用与多套响应信封判断直接复用 [`conformance/streamax-client
 | `VideoSource.id` | `device.uniqueId` | 直接映射 |
 | `VideoSource.fleetId` | `device.fleetId` | 直接映射；缺失时为空字符串 |
 | `VideoSource.online` | `onlineState === "ONLINE"` | 布尔化 |
-| `VideoSource.dormant` | `dormantState === "ASLEEP"` | 布尔化 |
+| `VideoSource.dormant` | `dormantState === "DORMANT"` | 布尔化；枚举为 AWAKE / DORMANT / UNKNOWN |
 | `VideoSource.channels` | `device.channels` | 逗号字符串拆数组，去重、过滤非法值 |
 | `Channel.id` | `channels` 中的通道号 | 数字通道号 |
-| `LiveSession` | `GET /v2/devices/{uniqueId}/live-links` | 一次性地址，默认有效期 10 秒 |
-| `PlaybackSession` | `GET /v2/devices/{uniqueId}/playback-links` | 一次性地址，默认有效期 20 秒，`storeType` 必传 |
-| `closeSession` | `POST /v2/devices/session-close` | 用 `uniqueId + session` 停止播放 |
-| `Alarm` | `GET /v2/alarms` | 字段暂保留锐明原始语义 |
+| `LiveSession` | `GET /v2/devices/{uniqueId}/live-links?channels=&streamingProtocol=` | 一次性地址，默认有效期 10 秒 |
+| `PlaybackSession` | `GET /v2/devices/{uniqueId}/playback-links?channels=&startTime=&endTime=&storeType=&streamingProtocol=` | 一次性地址，默认有效期 20 秒；`storeType` 为字符串枚举 `MAIN_STORAGE` / `SUB_STORAGE` |
+| `closeSession` | `POST /v2/devices/session-close` | 请求体只传 `{ session }` |
+| `Alarm` | `GET /v2/alarms?startTime=&endTime=&uniqueIds=` | `startTime` / `endTime` 必填，字段暂保留锐明原始语义 |
 | `getTrack` | 无历史轨迹接口 | 固定抛 `UNSUPPORTED_CAPABILITY` |
 | `createAnalysisJob` | 无 AI 分析能力 | 固定抛 `UNSUPPORTED_CAPABILITY` |
 
@@ -52,12 +52,14 @@ HTTP 调用与多套响应信封判断直接复用 [`conformance/streamax-client
 
 | 差异 | 处理 |
 | --- | --- |
-| `channels` 是逗号分隔字符串 | `parseStreamaxChannels` 兼容字符串与数组，输出数字通道数组 |
+| `channels` 是逗号分隔字符串 | `parseStreamaxChannels` 兼容字符串与数组，输出数字通道数组；请求参数名同样为 `channels` |
+| 媒体接口参数名 | 直播 / 回放统一使用 `channels` 与 `streamingProtocol`，不使用旧参数 `channel` / `protocol` |
 | 直播地址 10 秒有效 | 常量 `LIVE_LINK_TTL_SECONDS = 10`；响应未返回有效期时按文档计算 `expiresAt` |
 | 回放地址 20 秒有效 | 常量 `PLAYBACK_LINK_TTL_SECONDS = 20`；同上 |
 | 地址一次性，不可缓存 | 类型注释与 README 明确禁止落库/缓存，播放前实时申请 |
-| 会话需要显式关闭 | `closeSession` 调用 `session-close`，返回 `closed` 标记 |
-| 回放必须传 `storeType` | `createPlaybackSession` 参数强制要求 `0 \| 1` |
+| 会话需要显式关闭 | `closeSession` 调用 `session-close`，请求体只传 `{ session }`，返回 `closed` 标记 |
+| 回放必须传 `storeType` | `createPlaybackSession` 强制要求字符串枚举 `MAIN_STORAGE` / `SUB_STORAGE` |
+| 告警必须传时间范围 | `listAlarms` 要求 RFC 3339 的 `startTime` / `endTime`，按设备过滤使用 `uniqueIds` |
 | 无历史轨迹 | `getTrack` 抛 `UNSUPPORTED_CAPABILITY` |
 | 无 AI 分析 | `createAnalysisJob` 抛 `UNSUPPORTED_CAPABILITY` |
 
@@ -67,10 +69,10 @@ HTTP 调用与多套响应信封判断直接复用 [`conformance/streamax-client
 
 1. **视频源标识**：草案未冻结 `videoSource.id` 的取值规则，本原型取 `device.uniqueId`；车辆与视频源是绑定关系，但设备响应中没有 `vehicleId`，暂未映射。
 2. **通道模型**：锐明没有独立通道对象，只有通道号。`Channel` 目前只有 `id` 与 `videoSourceId`，没有名称、状态、能力等字段。
-3. **在线/休眠语义**：直接映射 `onlineState` / `dormantState`，未定义锐明枚举到 Connectors 枚举的完整映射表。
-4. **媒体有效期**：mock 返回 `expiresAt` / `expiresInSeconds`，真实环境可能不返回；适配层按文档 TTL 兜底，但 TTL 是否进入 V0.1 契约仍需 RFC 确认。
-5. **`storeType`**：锐明回放必传，V0.1 草案未登记该字段，正式实现前需要在 RFC 中明确是保留为适配层参数还是进入公共契约。
-6. **告警字段**：`alarmType`、`processStatus`、`realFlag` 暂为锐明原始语义，尚未映射为 Connectors 枚举；证据链接、证据文件下载未纳入本次原型。
+3. **在线/休眠语义**：`onlineState === "ONLINE"`、`dormantState === "DORMANT"`；规格枚举为 AWAKE / DORMANT / UNKNOWN，未定义完整映射表。
+4. **媒体有效期**：S2 mock 已按规格只返回 `channel` / `session` / `url`，不再返回 `expiresAt` / `expiresInSeconds`；适配层按文档 TTL 兜底计算，TTL 是否进入 V0.1 契约仍需 RFC 确认。
+5. **`storeType`**：锐明回放必传，且为字符串枚举 `MAIN_STORAGE` / `SUB_STORAGE`；V0.1 草案未登记该字段，正式实现前需要在 RFC 中明确是保留为适配层参数还是进入公共契约。
+6. **告警字段与参数**：`startTime` / `endTime` 必填，设备过滤参数为 `uniqueIds`；`alarmType`、`processStatus`、`realFlag` 暂为锐明原始语义，尚未映射为 Connectors 枚举；证据链接、证据文件下载未纳入本次原型。
 7. **track 降级**：锐明只有实时 GPS 推送与里程查询，没有历史轨迹；V0.1 的 `track` 能力需要明确降级策略，而不是在适配层伪造。
 8. **analysis**：锐明不提供 AI 分析，`analysisJob` / `analysisResult` 在锐明接入中应始终标记为不支持。
 9. **错误码表**：原型保留锐明业务码；V0.1 错误码表尚未定稿，正式实现需要做一次映射并保持可追溯。
