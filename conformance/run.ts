@@ -44,6 +44,10 @@ const SUPPORTED_PROVIDERS = new Set(["streamax"]);
 const PRE_RESEARCH_NOTICE =
   "预研版结果仅用于验证接入流程与自测脚本，不代表锐明真实环境或协议一致性结论。";
 
+/** 告警查询使用的合成时间范围，覆盖 mock 数据中的 2026-11-18。 */
+const ALARM_RANGE_START = encodeURIComponent("2026-11-18T00:00:00Z");
+const ALARM_RANGE_END = encodeURIComponent("2026-11-19T00:00:00Z");
+
 type JsonRecord = Record<string, unknown>;
 
 interface DeviceSummary {
@@ -110,7 +114,7 @@ function parseChannels(value: unknown): number[] {
   return [];
 }
 
-/** 校验媒体地址有效期；真实环境未返回有效期字段时只校验地址存在。 */
+/** 校验媒体地址有效期；真实环境未携带有效期信息时只校验地址存在。 */
 function verifyLinkTtl(link: JsonRecord, expectedSeconds: number, label: string): string {
   const url = link.url;
   assert(typeof url === "string" && url !== "", `${label}响应缺少 url`);
@@ -122,7 +126,33 @@ function verifyLinkTtl(link: JsonRecord, expectedSeconds: number, label: string)
     assert(ttl === expectedSeconds, `${label}有效期应为 ${expectedSeconds} 秒，实际 ${ttl} 秒`);
     return `有效期 ${ttl} 秒`;
   }
-  return "服务未返回 expiresInSeconds，仅校验地址存在（锐明文档：直播 10 秒、回放 20 秒）";
+
+  // 规格响应只返回 url；mock 在 URL 上带 expires 参数，真实环境可能不带。
+  let expiresAtUnix: number | undefined;
+  try {
+    const parsed = new URL(url);
+    const rawExpires = parsed.searchParams.get("expires");
+    if (rawExpires !== null && /^\d+$/.test(rawExpires)) {
+      expiresAtUnix = Number(rawExpires);
+    }
+  } catch {
+    // 非绝对地址时跳过有效期计算。
+  }
+
+  if (expiresAtUnix === undefined) {
+    return "响应仅包含 url，未携带 expires 参数，跳过有效期计算";
+  }
+
+  const remaining = expiresAtUnix - Date.now() / 1000;
+  assert(
+    remaining > expectedSeconds - 10,
+    `${label}有效期异常：剩余 ${remaining.toFixed(0)} 秒，期望约 ${expectedSeconds} 秒`,
+  );
+  assert(
+    remaining <= expectedSeconds + 1,
+    `${label}有效期异常：剩余 ${remaining.toFixed(0)} 秒，期望约 ${expectedSeconds} 秒`,
+  );
+  return `有效期约 ${expectedSeconds} 秒`;
 }
 
 /**
@@ -283,7 +313,7 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
     assert(ctx.channel > 0, "缺少通道号，无法申请直播地址");
     const response = await call(
       "live.links",
-      `/openapi/v2/devices/${encodeURIComponent(device.uniqueId)}/live-links?channel=${ctx.channel}&protocol=FLV`,
+      `/openapi/v2/devices/${encodeURIComponent(device.uniqueId)}/live-links?channels=${ctx.channel}&streamingProtocol=FLV`,
     );
     expectOk(response, "直播地址");
     const links = asArray(asRecord(response.body)?.data)
@@ -307,7 +337,7 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
     const endTime = encodeURIComponent("2026-11-18T08:05:00Z");
     const response = await call(
       "playback.links",
-      `/openapi/v2/devices/${encodeURIComponent(device.uniqueId)}/playback-links?channel=${ctx.channel}&startTime=${startTime}&endTime=${endTime}&storeType=0`,
+      `/openapi/v2/devices/${encodeURIComponent(device.uniqueId)}/playback-links?channels=${ctx.channel}&startTime=${startTime}&endTime=${endTime}&storeType=MAIN_STORAGE&streamingProtocol=FLV`,
     );
     expectOk(response, "回放地址");
     const links = asArray(asRecord(response.body)?.data)
@@ -322,7 +352,10 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
   });
 
   await run("alarms.list", "告警：列表与分页", async () => {
-    const first = await call("alarms.list", "/openapi/v2/alarms?page=1&pageSize=1");
+    const first = await call(
+      "alarms.list",
+      `/openapi/v2/alarms?page=1&pageSize=1&startTime=${ALARM_RANGE_START}&endTime=${ALARM_RANGE_END}`,
+    );
     expectOk(first, "告警列表");
     const firstRoot = asRecord(first.body);
     const firstPage = asArray(firstRoot?.data);
@@ -330,7 +363,10 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
     assert(Number(firstRoot?.page) === 1, `page 字段应为 1，实际 ${String(firstRoot?.page)}`);
     assert(Number(firstRoot?.pageSize) === 1, `pageSize 字段应为 1，实际 ${String(firstRoot?.pageSize)}`);
 
-    const all = await call("alarms.list", "/openapi/v2/alarms?page=1&pageSize=50");
+    const all = await call(
+      "alarms.list",
+      `/openapi/v2/alarms?page=1&pageSize=50&startTime=${ALARM_RANGE_START}&endTime=${ALARM_RANGE_END}`,
+    );
     expectOk(all, "告警列表");
     const alarms = asArray(asRecord(all.body)?.data)
       .map((item) => asRecord(item))
@@ -348,7 +384,7 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
     assert(ctx.alarmId !== "", "缺少 alarmId，无法申请证据链接");
     const response = await call(
       "alarms.evidence-link",
-      `/openapi/v2/alarms/evidence-link?alarmId=${encodeURIComponent(ctx.alarmId)}`,
+      `/openapi/v2/alarms/evidence-link?alarmId=${encodeURIComponent(ctx.alarmId)}&hasAudio=1&mediaProtocol=HTTP_FLV&streamType=MAJOR`,
     );
     expectOk(response, "证据链接");
     const data = asRecord(asRecord(response.body)?.data);
@@ -358,12 +394,11 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
   });
 
   await run("sessions.close", "会话：关闭", async () => {
-    const device = ctx.devices[0];
-    assert(device !== undefined, "缺少设备，无法关闭会话");
     assert(ctx.liveSession !== "", "缺少直播会话，无法关闭会话");
     const response = await call("sessions.close", "/openapi/v2/devices/session-close", {
       method: "POST",
-      body: { uniqueId: device.uniqueId, session: ctx.liveSession, type: "live" },
+      // CloseVideoV2ReqDTO 只要求 session。
+      body: { session: ctx.liveSession },
     });
     expectOk(response, "会话关闭");
     const root = asRecord(response.body);

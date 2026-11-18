@@ -86,11 +86,13 @@ npm run conformance -- --provider streamax --base-url http://127.0.0.1:18080
 | `sessions.close` | 关闭直播会话 |
 | `auth.bad-token` | 非法 token 返回 `code=3806` |
 
+查询参数按锐明 2.7.3-P3 规格：直播使用 `channels` + `streamingProtocol`；回放额外要求 `startTime`、`endTime`、`storeType`（`MAIN_STORAGE` / `SUB_STORAGE`）；告警必填 `startTime`、`endTime`，设备过滤用 `uniqueIds`；证据链接必填 `hasAudio`、`mediaProtocol`、`streamType`；会话关闭 body 只传 `session`。
+
 ### 切换到真实环境
 
 1. 替换 `--base-url` 为锐明网关根地址（不含 `/openapi` 后缀）；
 2. 使用锐明 Sign 鉴权获取 token，预研脚本不携带任何真实凭据，也不实现 Sign 签名；
-3. 真实环境响应可能不返回 `expiresInSeconds`，此时脚本只校验地址存在，有效期以锐明文档与联调结论为准；
+3. 真实环境直播/回放响应只有 `url`；脚本会尝试从 URL 的 `expires` 参数推算有效期，没有该参数时只校验地址存在；
 4. 锐明当前阻塞点为开放接口权限与租户凭证，详见 `providers/streamax/` 的 S1 预对接资料。
 
 mock 数据与自测结果只能说明脚本与接入流程可用，不能作为锐明真实环境结论。
