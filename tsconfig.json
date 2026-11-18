@@ -14,6 +14,6 @@
     "rootDir": ".",
     "outDir": "dist"
   },
-  "include": ["mock/**/*.ts", "conformance/**/*.ts", "tests/**/*.ts"],
+  "include": ["mock/**/*.ts", "conformance/**/*.ts", "spike/**/*.ts", "tests/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }
