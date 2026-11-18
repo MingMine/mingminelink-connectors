@@ -31,6 +31,20 @@ const DEFAULT_PORT = 18080;
 const DEFAULT_HOST = "127.0.0.1";
 const MAX_PAGE_SIZE = 100;
 
+/** 锐明 2.7.3-P3 媒体协议枚举。 */
+const STREAMING_PROTOCOLS: Record<string, string> = {
+  FLV: "flv",
+  HLS: "m3u8",
+  RTMP: "rtmp",
+  RTSP: "rtsp",
+};
+/** 锐明 2.7.3-P3 存储类型枚举。 */
+const STORE_TYPES = new Set(["MAIN_STORAGE", "SUB_STORAGE"]);
+/** 锐明 2.7.3-P3 证据链接媒体协议枚举。 */
+const EVIDENCE_MEDIA_PROTOCOLS = new Set(["HTTP_FLV", "HLS"]);
+/** 锐明 2.7.3-P3 证据流类型枚举。 */
+const EVIDENCE_STREAM_TYPES = new Set(["MAJOR", "MINOR"]);
+
 type JsonRecord = Record<string, unknown>;
 
 /** 安全地把 unknown 收窄为普通对象。 */
@@ -131,7 +145,16 @@ function deviceChannels(device: MockDevice): number[] {
     .filter((value) => Number.isInteger(value) && value > 0);
 }
 
-/** 根据 channel 参数筛选通道；请求了不存在的通道返回 undefined。 */
+/** 读取必填 query 参数；缺失或空白返回 undefined。 */
+function readRequiredParam(url: URL, name: string): string | undefined {
+  const value = url.searchParams.get(name);
+  if (value === null || value.trim() === "") {
+    return undefined;
+  }
+  return value.trim();
+}
+
+/** 根据 channels 参数筛选通道；请求了不存在的通道返回 undefined。 */
 function selectChannels(device: MockDevice, raw: string | null): number[] | undefined {
   const available = deviceChannels(device);
   if (raw === null || raw.trim() === "") {
@@ -251,24 +274,34 @@ function handleLiveLinks(uniqueId: string, url: URL, res: ServerResponse, reques
     return;
   }
 
-  const channels = selectChannels(device, url.searchParams.get("channel"));
-  if (channels === undefined) {
-    sendJson(res, 404, errorBody(requestId, 4041, "channel not found"));
+  // 锐明 2.7.3-P3：channels 与 streamingProtocol 均为必填。
+  const rawChannels = readRequiredParam(url, "channels");
+  if (rawChannels === undefined) {
+    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: channels"));
     return;
   }
-
-  const protocol = (url.searchParams.get("protocol") ?? "FLV").toUpperCase();
-  const formats: Record<string, string> = { FLV: "flv", HLS: "m3u8", RTMP: "rtmp", RTSP: "rtsp" };
-  const format = formats[protocol];
+  const streamingProtocol = readRequiredParam(url, "streamingProtocol");
+  if (streamingProtocol === undefined) {
+    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: streamingProtocol"));
+    return;
+  }
+  const format = STREAMING_PROTOCOLS[streamingProtocol];
   if (format === undefined) {
-    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: protocol"));
+    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: streamingProtocol"));
     return;
   }
 
+  const channels = selectChannels(device, rawChannels);
+  if (channels === undefined) {
+    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: channels"));
+    return;
+  }
+
+  // 规格响应项只有 channel、session、url。
   const data = channels.map((channel) => {
     const session = `TEST-LIVE-${device.uniqueId}-CH${channel}-${randomUUID().slice(0, 8)}`;
     const link = createMediaLink("live", session, new Date(), format);
-    return { channel, session, protocol, ...link };
+    return { channel, session, url: link.url };
   });
 
   sendJson(res, 200, { requestId, data });
@@ -282,20 +315,40 @@ function handlePlaybackLinks(uniqueId: string, url: URL, res: ServerResponse, re
     return;
   }
 
-  const startTime = url.searchParams.get("startTime");
-  const endTime = url.searchParams.get("endTime");
-  const storeType = url.searchParams.get("storeType");
-
-  if (startTime === null || startTime === "") {
+  // 锐明 2.7.3-P3：channels、startTime、endTime、storeType、streamingProtocol 均为必填。
+  const rawChannels = readRequiredParam(url, "channels");
+  if (rawChannels === undefined) {
+    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: channels"));
+    return;
+  }
+  const startTime = readRequiredParam(url, "startTime");
+  if (startTime === undefined) {
     sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: startTime"));
     return;
   }
-  if (endTime === null || endTime === "") {
+  const endTime = readRequiredParam(url, "endTime");
+  if (endTime === undefined) {
     sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: endTime"));
     return;
   }
-  if (storeType !== "0" && storeType !== "1") {
+  const storeType = readRequiredParam(url, "storeType");
+  if (storeType === undefined) {
     sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: storeType"));
+    return;
+  }
+  const streamingProtocol = readRequiredParam(url, "streamingProtocol");
+  if (streamingProtocol === undefined) {
+    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: streamingProtocol"));
+    return;
+  }
+
+  if (!STORE_TYPES.has(storeType)) {
+    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: storeType"));
+    return;
+  }
+  const format = STREAMING_PROTOCOLS[streamingProtocol];
+  if (format === undefined) {
+    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: streamingProtocol"));
     return;
   }
 
@@ -314,16 +367,17 @@ function handlePlaybackLinks(uniqueId: string, url: URL, res: ServerResponse, re
     return;
   }
 
-  const channels = selectChannels(device, url.searchParams.get("channel"));
+  const channels = selectChannels(device, rawChannels);
   if (channels === undefined) {
-    sendJson(res, 404, errorBody(requestId, 4041, "channel not found"));
+    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: channels"));
     return;
   }
 
+  // 规格响应项只有 channel、session、url。
   const data = channels.map((channel) => {
     const session = `TEST-PLAYBACK-${device.uniqueId}-CH${channel}-${randomUUID().slice(0, 8)}`;
-    const link = createMediaLink("playback", session, new Date(), "flv");
-    return { channel, session, startTime, endTime, storeType: Number(storeType), ...link };
+    const link = createMediaLink("playback", session, new Date(), format);
+    return { channel, session, url: link.url };
   });
 
   sendJson(res, 200, { requestId, data });
@@ -338,8 +392,40 @@ function handleAlarmList(url: URL, res: ServerResponse, requestId: string): void
     return;
   }
 
-  const uniqueId = url.searchParams.get("uniqueId");
-  const filtered = MOCK_ALARMS.filter((alarm) => uniqueId === null || uniqueId === "" || alarm.uniqueId === uniqueId);
+  // 锐明 2.7.3-P3：startTime、endTime 必填；设备过滤参数名为 uniqueIds。
+  const startTime = readRequiredParam(url, "startTime");
+  if (startTime === undefined) {
+    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: startTime"));
+    return;
+  }
+  const endTime = readRequiredParam(url, "endTime");
+  if (endTime === undefined) {
+    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: endTime"));
+    return;
+  }
+
+  const startMs = Date.parse(startTime);
+  const endMs = Date.parse(endTime);
+  if (Number.isNaN(startMs)) {
+    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: startTime"));
+    return;
+  }
+  if (Number.isNaN(endMs)) {
+    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: endTime"));
+    return;
+  }
+  if (startMs >= endMs) {
+    sendJson(res, 400, errorBody(requestId, 3800, "endTime must be later than startTime"));
+    return;
+  }
+
+  const uniqueIds = splitCsv(url.searchParams.get("uniqueIds"));
+  const filtered = MOCK_ALARMS.filter((alarm) => {
+    const alarmStart = Date.parse(alarm.startTime);
+    const inRange = alarmStart >= startMs && alarmStart <= endMs;
+    const matchUniqueId = uniqueIds.length === 0 || uniqueIds.includes(alarm.uniqueId);
+    return inRange && matchUniqueId;
+  });
   const offset = (page - 1) * pageSize;
 
   sendJson(res, 200, {
@@ -353,9 +439,38 @@ function handleAlarmList(url: URL, res: ServerResponse, requestId: string): void
 
 /** GET /openapi/v2/alarms/evidence-link */
 function handleEvidenceLink(url: URL, res: ServerResponse, requestId: string): void {
-  const alarmId = url.searchParams.get("alarmId");
-  if (alarmId === null || alarmId === "") {
+  // 锐明 2.7.3-P3：alarmId、hasAudio、mediaProtocol、streamType 均为必填。
+  const alarmId = readRequiredParam(url, "alarmId");
+  if (alarmId === undefined) {
     sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: alarmId"));
+    return;
+  }
+  const hasAudio = readRequiredParam(url, "hasAudio");
+  if (hasAudio === undefined) {
+    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: hasAudio"));
+    return;
+  }
+  const mediaProtocol = readRequiredParam(url, "mediaProtocol");
+  if (mediaProtocol === undefined) {
+    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: mediaProtocol"));
+    return;
+  }
+  const streamType = readRequiredParam(url, "streamType");
+  if (streamType === undefined) {
+    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: streamType"));
+    return;
+  }
+
+  if (hasAudio !== "0" && hasAudio !== "1") {
+    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: hasAudio"));
+    return;
+  }
+  if (!EVIDENCE_MEDIA_PROTOCOLS.has(mediaProtocol)) {
+    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: mediaProtocol"));
+    return;
+  }
+  if (!EVIDENCE_STREAM_TYPES.has(streamType)) {
+    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: streamType"));
     return;
   }
 
@@ -384,20 +499,12 @@ async function handleSessionClose(req: IncomingMessage, res: ServerResponse, req
     return;
   }
 
+  // 锐明 2.7.3-P3 CloseVideoV2ReqDTO 只要求 session。
   const payload = asRecord(body.value);
-  const uniqueId = typeof payload?.uniqueId === "string" ? payload.uniqueId : "";
   const session = typeof payload?.session === "string" ? payload.session : "";
 
-  if (uniqueId === "") {
-    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: uniqueId"));
-    return;
-  }
   if (session === "") {
     sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: session"));
-    return;
-  }
-  if (findDevice(uniqueId) === undefined) {
-    sendJson(res, 404, errorBody(requestId, 4040, "device not found"));
     return;
   }
 
@@ -407,7 +514,6 @@ async function handleSessionClose(req: IncomingMessage, res: ServerResponse, req
     success: true,
     message: "success",
     data: {
-      uniqueId,
       session,
       closed: true,
     },

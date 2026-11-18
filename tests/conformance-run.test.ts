@@ -30,6 +30,12 @@ describe("预研版一致性自测端到端", () => {
       expect(report.summary.total).toBeGreaterThanOrEqual(10);
       expect(report.checks.every((check) => check.status === "passed")).toBe(true);
       expect(report.checks.map((check) => check.id)).toContain("auth.bad-token");
+
+      // 新参数链路：直播/回放响应只有 url，有效期从地址推导。
+      const live = report.checks.find((check) => check.id === "live.links");
+      const playback = report.checks.find((check) => check.id === "playback.links");
+      expect(live?.detail).toContain("有效期约 10 秒");
+      expect(playback?.detail).toContain("有效期约 20 秒");
     } finally {
       await stopServer(server);
     }
