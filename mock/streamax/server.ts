@@ -4,7 +4,8 @@
  * 说明：
  * 1. 本服务只模拟预研所需的关键端点，不是锐明平台的完整实现；
  * 2. 所有数据均为合成数据，设备号、租户号、媒体域名均为虚构值；
- * 3. 鉴权仅校验固定 mock token，不实现锐明 Sign 签名方案。
+ * 3. 鉴权端点严格校验固定 mock 账号与 secret；其余端点只校验固定 mock token，
+ *    不实现锐明 Sign 签名方案。
  *
  * 默认启动：node dist/mock/streamax/server.js（127.0.0.1:18080）
  */
@@ -17,10 +18,12 @@ import {
   type ServerResponse,
 } from "node:http";
 import {
+  MOCK_ACCOUNT,
   MOCK_ALARMS,
   MOCK_APP_ID,
   MOCK_DEVICES,
   MOCK_PUBLIC_KEY,
+  MOCK_SECRET,
   MOCK_TENANT_ID,
   MOCK_TOKEN,
   type MockDevice,
@@ -203,13 +206,13 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, requestId: 
     typeof tenantRaw === "number" ? String(tenantRaw) : typeof tenantRaw === "string" ? tenantRaw : "";
   const appRaw = payload?.appId;
   const appId = typeof appRaw === "number" ? String(appRaw) : typeof appRaw === "string" ? appRaw : "";
+  const identifyCodeRaw = payload?.identifyCode;
+  const identifyCode = typeof identifyCodeRaw === "string" ? identifyCodeRaw : "";
+  const secretRaw = payload?.secret;
+  const secret = typeof secretRaw === "string" ? secretRaw : "";
 
-  if (tenantId === "") {
-    sendJson(res, 400, errorBody(requestId, 3800, "invalid parameter: tenantId"));
-    return;
-  }
-  // 合成租户号固定为 100001，其他租户按非法用户处理。
-  if (tenantId !== MOCK_TENANT_ID) {
+  // 严格校验固定 mock 账号与 secret；任何不匹配都按非法用户处理。
+  if (identifyCode !== MOCK_ACCOUNT || secret !== MOCK_SECRET) {
     sendJson(res, 401, errorBody(requestId, 3806, "illegal user"));
     return;
   }
@@ -223,7 +226,7 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, requestId: 
       token: MOCK_TOKEN,
       tokenType: "token",
       expiresIn: 86400,
-      tenantId,
+      tenantId: tenantId === "" ? MOCK_TENANT_ID : tenantId,
       appId: appId === "" ? MOCK_APP_ID : appId,
     },
   });
@@ -247,12 +250,12 @@ function handleDeviceList(url: URL, res: ServerResponse, requestId: string): voi
   });
 
   const offset = (page - 1) * pageSize;
+  // 2.7.3-P3 PageResponse 只有 data、page、pageSize、requestId，不返回 total。
   sendJson(res, 200, {
     requestId,
     data: filtered.slice(offset, offset + pageSize).map((device) => ({ ...device })),
     page,
     pageSize,
-    total: filtered.length,
   });
 }
 
@@ -428,12 +431,12 @@ function handleAlarmList(url: URL, res: ServerResponse, requestId: string): void
   });
   const offset = (page - 1) * pageSize;
 
+  // 2.7.3-P3 PageResponse 只有 data、page、pageSize、requestId，不返回 total。
   sendJson(res, 200, {
     requestId,
     data: filtered.slice(offset, offset + pageSize).map((alarm) => ({ ...alarm })),
     page,
     pageSize,
-    total: filtered.length,
   });
 }
 

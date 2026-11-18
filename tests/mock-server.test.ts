@@ -1,14 +1,16 @@
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { MOCK_TOKEN } from "../mock/streamax/data";
+import { MOCK_ACCOUNT, MOCK_SECRET, MOCK_TOKEN } from "../mock/streamax/data";
 import { createMockServer } from "../mock/streamax/server";
 
 let server: Server;
 let baseUrl: string;
 
-/** 覆盖合成告警（2026-11-18）的时间范围。 */
-const ALARM_RANGE = "startTime=2026-11-18T00:00:00Z&endTime=2026-11-19T00:00:00Z";
+/** 覆盖相对当前时间生成的合成告警。 */
+const ALARM_RANGE =
+  `startTime=${encodeURIComponent(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())}` +
+  `&endTime=${encodeURIComponent(new Date(Date.now() + 60 * 1000).toISOString())}`;
 
 beforeAll(async () => {
   server = createMockServer();
@@ -78,10 +80,28 @@ describe("锐明 mock 鉴权", () => {
   it("合成凭证换取固定 token", async () => {
     const response = await request("/openapi/auth", {
       method: "POST",
-      body: { appId: "10001", tenantId: "100001", tenantSecret: "TEST-MOCK-SECRET" },
+      body: { identifyCode: MOCK_ACCOUNT, secret: MOCK_SECRET },
     });
     expect(response.status).toBe(200);
     expect(response.body.data.token).toBe(MOCK_TOKEN);
+  });
+
+  it("错误 secret 返回 401 与 3806", async () => {
+    const response = await request("/openapi/auth", {
+      method: "POST",
+      body: { identifyCode: MOCK_ACCOUNT, secret: "TEST-WRONG-SECRET" },
+    });
+    expect(response.status).toBe(401);
+    expect(response.body).toMatchObject({ code: 3806, success: false });
+  });
+
+  it("未知账号返回 401 与 3806", async () => {
+    const response = await request("/openapi/auth", {
+      method: "POST",
+      body: { identifyCode: "TEST-UNKNOWN", secret: MOCK_SECRET },
+    });
+    expect(response.status).toBe(401);
+    expect(response.body).toMatchObject({ code: 3806, success: false });
   });
 });
 
@@ -92,7 +112,8 @@ describe("分页参数", () => {
     expect(response.body.data).toHaveLength(2);
     expect(response.body.page).toBe(1);
     expect(response.body.pageSize).toBe(2);
-    expect(response.body.total).toBe(3);
+    // 2.7.3-P3 PageResponse 不返回 total。
+    expect(response.body).not.toHaveProperty("total");
   });
 
   it("第二页返回剩余数据", async () => {
@@ -125,7 +146,7 @@ describe("分页参数", () => {
     expect(response.status).toBe(200);
     expect(response.body.data).toHaveLength(1);
     expect(response.body.pageSize).toBe(1);
-    expect(response.body.total).toBe(3);
+    expect(response.body).not.toHaveProperty("total");
   });
 
   it("告警缺少 startTime/endTime 返回 3800", async () => {
@@ -141,8 +162,23 @@ describe("分页参数", () => {
       { token: MOCK_TOKEN },
     );
     expect(response.status).toBe(200);
-    expect(response.body.total).toBe(2);
+    expect(response.body.data).toHaveLength(2);
+    expect(response.body).not.toHaveProperty("total");
     expect(response.body.data.every((alarm: any) => alarm.uniqueId === "TEST00000001")).toBe(true);
+  });
+});
+
+describe("设备数据枚举", () => {
+  it("dormantState 仅使用 2.7.3-P3 的 AWAKE/DORMANT/UNKNOWN", async () => {
+    const response = await request("/openapi/v2/devices?page=1&pageSize=20", { token: MOCK_TOKEN });
+    expect(response.status).toBe(200);
+    expect(response.body.data.length).toBeGreaterThan(0);
+    const allowed = new Set(["AWAKE", "DORMANT", "UNKNOWN"]);
+    for (const device of response.body.data) {
+      expect(allowed.has(device.dormantState)).toBe(true);
+    }
+    // 防止回退为旧枚举 ASLEEP。
+    expect(response.body.data.some((device: any) => device.dormantState === "ASLEEP")).toBe(false);
   });
 });
 

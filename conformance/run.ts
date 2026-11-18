@@ -9,11 +9,23 @@
  */
 
 import { writeFile } from "node:fs/promises";
+import { MOCK_ACCOUNT, MOCK_SECRET, MOCK_TOKEN } from "../mock/streamax/data";
 import { StreamaxClient, type StreamaxResponse } from "./streamax-client";
+
+/** 外部鉴权参数；缺省时仅回环地址允许回退 mock token。 */
+export interface ConformanceAuthOptions {
+  token?: string;
+  sign?: string;
+  tenantId?: string;
+}
 
 export interface ConformanceOptions {
   provider: string;
   baseUrl: string;
+  auth?: ConformanceAuthOptions;
+  /** RFC3339 起始时间；缺省为结束时间前 24 小时。 */
+  startTime?: string;
+  endTime?: string;
 }
 
 export interface CheckResult {
@@ -44,9 +56,77 @@ const SUPPORTED_PROVIDERS = new Set(["streamax"]);
 const PRE_RESEARCH_NOTICE =
   "预研版结果仅用于验证接入流程与自测脚本，不代表锐明真实环境或协议一致性结论。";
 
-/** 告警查询使用的合成时间范围，覆盖 mock 数据中的 2026-11-18。 */
-const ALARM_RANGE_START = encodeURIComponent("2026-11-18T00:00:00Z");
-const ALARM_RANGE_END = encodeURIComponent("2026-11-19T00:00:00Z");
+/** 鉴权模式：外部 token、Sign（sign + tenantId）、或本地 mock 回退。 */
+export type ConformanceAuthMode = "token" | "sign" | "mock";
+
+export interface ResolvedAuth {
+  mode: ConformanceAuthMode;
+  token?: string;
+  sign?: string;
+  tenantId?: string;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+
+/**
+ * 解析鉴权方式。
+ *
+ * 优先级：token → sign + tenantId → 仅回环地址回退 mock token；
+ * 非回环地址缺少鉴权参数时抛错，避免“只换 base-url”误连真实环境。
+ */
+export function resolveAuth(baseUrl: string, auth: ConformanceAuthOptions = {}): ResolvedAuth {
+  const token = auth.token?.trim() ?? "";
+  if (token !== "") {
+    return { mode: "token", token };
+  }
+
+  const sign = auth.sign?.trim() ?? "";
+  const tenantId = auth.tenantId?.trim() ?? "";
+  if (sign !== "" && tenantId !== "") {
+    return { mode: "sign", sign, tenantId };
+  }
+  if (sign !== "" || tenantId !== "") {
+    throw new Error("Sign 鉴权需要同时提供 --sign 与 --tenant-id（或 STREAMAX_SIGN / STREAMAX_TENANT_ID）。");
+  }
+
+  let hostname: string;
+  try {
+    hostname = new URL(baseUrl).hostname;
+  } catch {
+    throw new Error(`非法的 base-url：${baseUrl}`);
+  }
+
+  if (isLoopbackHost(hostname)) {
+    return { mode: "mock", token: MOCK_TOKEN };
+  }
+
+  throw new Error(
+    "缺少鉴权参数：请提供 --token，或 --sign 与 --tenant-id（也可用环境变量 " +
+      "STREAMAX_TOKEN / STREAMAX_SIGN / STREAMAX_TENANT_ID）；仅 localhost/127.0.0.1 允许回退 mock token。",
+  );
+}
+
+/** 解析告警查询时间窗；默认最近 24 小时，显式参数必须是可解析的 RFC3339。 */
+export function resolveTimeWindow(
+  startTime?: string,
+  endTime?: string,
+): { start: string; end: string } {
+  const endMs = endTime === undefined ? Date.now() : Date.parse(endTime);
+  if (Number.isNaN(endMs)) {
+    throw new Error(`非法的 --end-time：${String(endTime)}`);
+  }
+  const startMs = startTime === undefined ? endMs - 24 * 60 * 60 * 1000 : Date.parse(startTime);
+  if (Number.isNaN(startMs)) {
+    throw new Error(`非法的 --start-time：${String(startTime)}`);
+  }
+  if (startMs >= endMs) {
+    throw new Error("--start-time 必须早于 --end-time");
+  }
+  return { start: new Date(startMs).toISOString(), end: new Date(endMs).toISOString() };
+}
 
 type JsonRecord = Record<string, unknown>;
 
@@ -162,7 +242,12 @@ function verifyLinkTtl(link: JsonRecord, expectedSeconds: number, label: string)
  */
 export async function runConformance(options: ConformanceOptions): Promise<ConformanceReport> {
   const startedAt = new Date().toISOString();
-  const client = new StreamaxClient(options.baseUrl);
+  const auth = resolveAuth(options.baseUrl, options.auth);
+  // 默认最近 24 小时，避免写死日期导致 mock 数据过期后自测失效。
+  const timeWindow = resolveTimeWindow(options.startTime, options.endTime);
+  const startParam = encodeURIComponent(timeWindow.start);
+  const endParam = encodeURIComponent(timeWindow.end);
+  const client = new StreamaxClient(options.baseUrl, auth);
   const checks: CheckResult[] = [];
 
   const ctx: {
@@ -172,7 +257,8 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
     liveSession: string;
     alarmId: string;
   } = {
-    token: "",
+    // mock 模式在换取 token 用例中回填；token/sign 模式由客户端鉴权配置负责。
+    token: auth.mode === "token" ? auth.token ?? "" : "",
     devices: [],
     channel: 0,
     liveSession: "",
@@ -238,19 +324,26 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
     return "公钥字段存在";
   });
 
-  await run("auth.token", "鉴权：换取 Token", async () => {
-    const response = await call("auth.token", "/openapi/auth", {
-      method: "POST",
-      // 合成凭证，仅用于 mock；真实环境使用锐明 Sign 或 Token。
-      body: { appId: "10001", tenantId: "100001", tenantSecret: "TEST-MOCK-SECRET" },
-      token: "",
-    });
-    expectOk(response, "换取 Token");
-    const data = asRecord(asRecord(response.body)?.data);
-    const token = data?.token;
-    assert(typeof token === "string" && token !== "", "响应缺少 token 字段");
-    ctx.token = token;
-    return "Token 获取成功（合成值）";
+  await run("auth.token", "鉴权：换取或验证 Token", async () => {
+    if (auth.mode === "mock") {
+      const response = await call("auth.token", "/openapi/auth", {
+        method: "POST",
+        // 固定合成账号与 secret，仅用于本地 mock；真实环境不经过此分支。
+        body: { identifyCode: MOCK_ACCOUNT, secret: MOCK_SECRET },
+        token: "",
+      });
+      expectOk(response, "换取 Token");
+      const data = asRecord(asRecord(response.body)?.data);
+      const token = data?.token;
+      assert(typeof token === "string" && token !== "", "响应缺少 token 字段");
+      ctx.token = token;
+      return "Token 获取成功（合成值）";
+    }
+
+    // 真实环境不假设能直接换取 token，用一次受保护请求验证鉴权头被接受。
+    const response = await call("auth.token", "/openapi/v2/devices?page=1&pageSize=1");
+    expectOk(response, auth.mode === "token" ? "Token 鉴权" : "Sign 鉴权");
+    return auth.mode === "token" ? "外部 Token 可用" : "外部 Sign 鉴权可用";
   });
 
   await run("devices.list", "设备：列表与分页", async () => {
@@ -354,7 +447,7 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
   await run("alarms.list", "告警：列表与分页", async () => {
     const first = await call(
       "alarms.list",
-      `/openapi/v2/alarms?page=1&pageSize=1&startTime=${ALARM_RANGE_START}&endTime=${ALARM_RANGE_END}`,
+      `/openapi/v2/alarms?page=1&pageSize=1&startTime=${startParam}&endTime=${endParam}`,
     );
     expectOk(first, "告警列表");
     const firstRoot = asRecord(first.body);
@@ -365,7 +458,7 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
 
     const all = await call(
       "alarms.list",
-      `/openapi/v2/alarms?page=1&pageSize=50&startTime=${ALARM_RANGE_START}&endTime=${ALARM_RANGE_END}`,
+      `/openapi/v2/alarms?page=1&pageSize=50&startTime=${startParam}&endTime=${endParam}`,
     );
     expectOk(all, "告警列表");
     const alarms = asArray(asRecord(all.body)?.data)
@@ -464,6 +557,11 @@ interface CliOptions {
   provider?: string;
   baseUrl?: string;
   reportPath?: string;
+  token?: string;
+  sign?: string;
+  tenantId?: string;
+  startTime?: string;
+  endTime?: string;
   help?: boolean;
 }
 
@@ -492,6 +590,16 @@ function parseArgs(argv: string[]): CliOptions {
       options.baseUrl = takeValue();
     } else if (key === "--report") {
       options.reportPath = takeValue();
+    } else if (key === "--token") {
+      options.token = takeValue();
+    } else if (key === "--sign") {
+      options.sign = takeValue();
+    } else if (key === "--tenant-id") {
+      options.tenantId = takeValue();
+    } else if (key === "--start-time") {
+      options.startTime = takeValue();
+    } else if (key === "--end-time") {
+      options.endTime = takeValue();
     } else if (key === "--help" || key === "-h") {
       options.help = true;
     }
@@ -503,12 +611,20 @@ function printUsage(): void {
   console.log(
     [
       "用法：",
-      "  npm run conformance -- --provider streamax --base-url http://127.0.0.1:18080 [--report ./conformance-report.json]",
+      "  npm run conformance -- --provider streamax --base-url http://127.0.0.1:18080 [鉴权参数] [时间窗参数]",
       "",
       "参数：",
-      "  --provider   接入方名称，当前预研版仅支持 streamax",
-      "  --base-url   服务根地址（不含 /openapi 后缀），mock 默认 http://127.0.0.1:18080",
-      "  --report     可选，额外写入 JSON 报告文件",
+      "  --provider     接入方名称，当前预研版仅支持 streamax",
+      "  --base-url     服务根地址（不含 /openapi 后缀），mock 默认 http://127.0.0.1:18080",
+      "  --token        访问 token，作为 token 请求头发送（或环境变量 STREAMAX_TOKEN）",
+      "  --sign         Sign 签名，与 --tenant-id 一起作为 _sign 请求头发送（或 STREAMAX_SIGN）",
+      "  --tenant-id    租户号，作为 _tenantid 请求头发送（或 STREAMAX_TENANT_ID）",
+      "  --start-time   告警查询起始时间（RFC3339），默认最近 24 小时",
+      "  --end-time     告警查询结束时间（RFC3339），默认当前时间",
+      "  --report       可选，额外写入 JSON 报告文件",
+      "",
+      "鉴权说明：有 token 用 token 头；否则用 sign + tenant-id 的 _sign/_tenantid 头；",
+      "两者都没有时仅 localhost/127.0.0.1 回退 mock token，其他地址直接报错退出。",
     ].join("\n"),
   );
 }
@@ -532,7 +648,19 @@ async function main(): Promise<void> {
     return;
   }
 
-  const report = await runConformance({ provider: options.provider, baseUrl: options.baseUrl });
+  const auth: ConformanceAuthOptions = {
+    token: options.token ?? process.env.STREAMAX_TOKEN,
+    sign: options.sign ?? process.env.STREAMAX_SIGN,
+    tenantId: options.tenantId ?? process.env.STREAMAX_TENANT_ID,
+  };
+
+  const report = await runConformance({
+    provider: options.provider,
+    baseUrl: options.baseUrl,
+    auth,
+    startTime: options.startTime,
+    endTime: options.endTime,
+  });
 
   console.log(formatSummary(report));
 
