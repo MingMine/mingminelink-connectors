@@ -18,6 +18,8 @@ auth:
 
 mapping:
   # 视频源为核心抽象；锐明用 device.uniqueId 标识设备。
+  # 待 RFC：providers/README 的最小结构尚未登记 videoSourceId，
+  # 本草案先保留映射意图，正式字段名以 V0.1 RFC 结论为准。
   videoSourceId: uniqueId
   mineId: tenantId
   vehicleId: vehicleId

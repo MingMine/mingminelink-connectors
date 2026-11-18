@@ -37,6 +37,19 @@
 
 映射结论：锐明的核心视频链路（设备 → 通道 → 直播 / 回放 → 告警证据）可以在不修改视频源抽象的前提下完成映射；`track` 需要降级为“实时 GPS 推送”，`analysis` 不在锐明能力范围内。
 
+### 2.1 接口参数基线（2.7.3-P3）
+
+| 场景 | 接口 | 必填参数 | 关键约束 |
+| --- | --- | --- | --- |
+| 设备列表 | `GET /v2/devices` | `page`、`pageSize` | 可选 `uniqueIds`、`fleetIds` |
+| 设备详情 | `GET /v2/devices/{uniqueId}` | `uniqueId` | —— |
+| 直播 | `GET /v2/devices/{uniqueId}/live-links` | `channels`、`streamingProtocol` | 一次性地址，10 秒有效 |
+| 回放 | `GET /v2/devices/{uniqueId}/playback-links` | `channels`、`startTime`、`endTime`、`storeType`、`streamingProtocol` | `storeType` 为 `MAIN_STORAGE` / `SUB_STORAGE`；一次性地址，20 秒有效 |
+| 告警 | `GET /v2/alarms` | `startTime`、`endTime` | 设备过滤用 `uniqueIds`；可选 `alarmTypes` |
+| 证据链接 | `GET /v2/alarms/evidence-link` | `alarmId`、`hasAudio`、`mediaProtocol`、`streamType` | `mediaProtocol` 为 `HTTP_FLV` / `HLS` |
+| 会话关闭 | `POST /v2/devices/session-close` | body `session` | 只传 `session`，不传 `uniqueId` |
+| 设备状态 | —— | —— | `dormantState` 枚举为 `AWAKE` / `DORMANT` / `UNKNOWN` |
+
 ## 3. 周一对接所需信息清单
 
 以下内容建议在对接会上逐项确认，锐明只需要提供信息与权限，不需要编写代码。
@@ -99,7 +112,7 @@
 | 开放网关连通 | 通过，`GET /openapi/auth/public-key` 返回 RSA 公钥 |
 | 账号换取 Token | 通过，`code=200`，有效期约 1 天 |
 | 设备 / 车辆 / 车组查询 | 失败，HTTP 400，`code=207001 User has no permission` |
-| 平台 UI 查找 tenantSecret | 未找到；仅见掩码后的白名单 Key 与租户编码 `MSCLOUD` |
+| 平台 UI 查找 tenantSecret | 未找到；仅见掩码后的白名单 Key 与租户编码 `MSC***` |
 
 结论：网关与鉴权链路可用，当前阻塞点是开放接口权限与租户凭证，不是接口本身不可用。
 
