@@ -1,7 +1,7 @@
 import { createServer as createHttpServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { MOCK_TOKEN } from "../mock/streamax/data";
+import { MOCK_ACCOUNT, MOCK_SECRET, MOCK_TOKEN } from "../mock/streamax/data";
 import { createMockServer } from "../mock/streamax/server";
 import {
   ConnectorsError,
@@ -71,6 +71,21 @@ beforeAll(async () => {
           fleetId: "TEST-FLEET",
           onlineState: "ONLINE",
           dormantState: "DORMANT",
+          channels: "1",
+          deviceType: "TEST-DEVICE",
+        },
+      });
+      return;
+    }
+    // 旧枚举 ASLEEP 属非规格值，用于验证适配层不会误判为休眠。
+    if (url.pathname === "/openapi/v2/devices/TEST-ASLEEP-0001") {
+      send({
+        requestId: "stub-device-asleep",
+        data: {
+          uniqueId: "TEST-ASLEEP-0001",
+          fleetId: "TEST-FLEET",
+          onlineState: "OFFLINE",
+          dormantState: "ASLEEP",
           channels: "1",
           deviceType: "TEST-DEVICE",
         },
@@ -153,7 +168,8 @@ describe("视频源与通道映射", () => {
     expect(page.items).toHaveLength(2);
     expect(page.page).toBe(1);
     expect(page.pageSize).toBe(2);
-    expect(page.total).toBe(3);
+    // mock 按 2.7.3-P3 不返回 total，适配层回退为当前页条数。
+    expect(page.total).toBe(2);
     expect(page.requestId).toMatch(/^spike-test-/);
 
     const first = page.items[0];
@@ -168,14 +184,14 @@ describe("视频源与通道映射", () => {
     expect(first?.channels.every((channel) => channel.videoSourceId === "TEST00000001")).toBe(true);
   });
 
-  it("uniqueIds 过滤生效，ASLEEP 不再视为休眠", async () => {
+  it("uniqueIds 过滤生效，DORMANT 映射为休眠", async () => {
     const page = await adapter.listVideoSources({ uniqueIds: ["TEST00000002"] });
 
     expect(page.items).toHaveLength(1);
     expect(page.items[0]?.id).toBe("TEST00000002");
     expect(page.items[0]?.online).toBe(false);
-    // 规格枚举为 AWAKE/DORMANT/UNKNOWN，mock 合成值 ASLEEP 不应映射为休眠。
-    expect(page.items[0]?.dormant).toBe(false);
+    // 规格枚举为 AWAKE/DORMANT/UNKNOWN，DORMANT 才是休眠。
+    expect(page.items[0]?.dormant).toBe(true);
   });
 
   it("通道解析兼容逗号字符串与数组，并忽略非法值", () => {
@@ -234,16 +250,18 @@ describe("直播与回放会话", () => {
 });
 
 describe("告警映射", () => {
+  // mock 告警时间以加载时间为基准合成，使用最近 24 小时覆盖全部告警。
   const range = {
-    startTime: "2026-11-18T00:00:00Z",
-    endTime: "2026-11-18T23:59:59Z",
+    startTime: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    endTime: new Date(Date.now() + 60 * 1000).toISOString(),
   };
 
   it("告警列表保留锐明原始语义并支持分页", async () => {
     const page = await adapter.listAlarms({ ...range, page: 1, pageSize: 2 });
 
     expect(page.items).toHaveLength(2);
-    expect(page.total).toBe(3);
+    // mock 不返回 total，适配层回退为当前页条数。
+    expect(page.total).toBe(2);
     expect(page.items[0]).toMatchObject({
       alarmId: "TEST-ALARM-0001",
       videoSourceId: "TEST00000001",
@@ -269,6 +287,44 @@ describe("告警映射", () => {
 
     expect(error.code).toBe(3800);
     expect(error.message).toContain("startTime");
+  });
+});
+
+describe("严格鉴权", () => {
+  /** 调用 mock 的 /openapi/auth 换取 token。 */
+  async function postAuth(payload: Record<string, unknown>): Promise<{ status: number; body: any }> {
+    const response = await fetch(`${baseUrl}/openapi/auth`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-request-id": "spike-auth" },
+      body: JSON.stringify(payload),
+    });
+    return { status: response.status, body: (await response.json()) as any };
+  }
+
+  it("账号或 secret 不匹配时拒绝签发 token", async () => {
+    const wrongSecret = await postAuth({ identifyCode: MOCK_ACCOUNT, secret: "TEST-WRONG-SECRET" });
+    expect(wrongSecret.status).toBe(401);
+    expect(wrongSecret.body).toMatchObject({ code: 3806, success: false });
+    expect(wrongSecret.body.data?.token).toBeUndefined();
+
+    const wrongAccount = await postAuth({ identifyCode: "TEST-UNKNOWN", secret: MOCK_SECRET });
+    expect(wrongAccount.status).toBe(401);
+    expect(wrongAccount.body).toMatchObject({ code: 3806, success: false });
+    expect(wrongAccount.body.data?.token).toBeUndefined();
+  });
+
+  it("固定账号换取 token 后可调用适配层", async () => {
+    const auth = await postAuth({ identifyCode: MOCK_ACCOUNT, secret: MOCK_SECRET });
+    expect(auth.status).toBe(200);
+    expect(auth.body.data.token).toBe(MOCK_TOKEN);
+
+    const authorized = new StreamaxAdapter({
+      baseUrl,
+      token: auth.body.data.token,
+      requestIdPrefix: "spike-auth",
+    });
+    const page = await authorized.listVideoSources({ page: 1, pageSize: 1 });
+    expect(page.items).toHaveLength(1);
   });
 });
 
@@ -372,6 +428,12 @@ describe("规格参数名与请求体", () => {
 
     expect(source.dormant).toBe(true);
     expect(source.online).toBe(true);
+  });
+
+  it("非规格枚举 ASLEEP 不映射为休眠", async () => {
+    const source = await stubAdapter.getVideoSource("TEST-ASLEEP-0001");
+
+    expect(source.dormant).toBe(false);
   });
 });
 
