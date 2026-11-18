@@ -1,0 +1,17 @@
+{
+  "headers": {
+    "X-Webhook-Signature": "TEST_SIGNATURE_NOT_A_REAL_SECRET"
+  },
+  "body": {
+    "type": "ALARM",
+    "data": {
+      "alarmId": "TEST-ALARM-0001",
+      "uniqueId": "TEST00000001",
+      "vehicleId": "900000000000000002",
+      "vehicleNumber": "TEST-VEHICLE-01",
+      "alarmType": 56002,
+      "startTime": "2026-11-18T08:00:00Z",
+      "endTime": "2026-11-18T08:01:00Z"
+    }
+  }
+}

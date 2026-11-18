@@ -1,0 +1,37 @@
+# 锐明技术（Streamax）Mining Platform 接入映射草案
+# 状态：草案，待 V0.1 RFC 评审；字段名以锐明 OpenAPI V2.7.3-P3 为准。
+# 安全：本文件不包含任何真实凭据，baseUrl 仅指向 UAT 环境。
+
+provider: streamax
+displayName: 锐明技术 Mining Platform
+protocolVersion: "0.1"
+
+# UAT 网关地址，仅用于联调；生产地址由部署配置注入，不写入仓库。
+baseUrl: https://uat-saas-8.streamax.com/openapi
+
+auth:
+  # 锐明实际使用私有签名方案：请求头 _sign + _tenantid，
+  # 由 appId、tenantId、tenantSecret 按 AES + MD5 规则生成。
+  # V0.1 目前只登记 oauth2 / apiKey / mtls 三种类型，
+  # 本草案暂以 apiKey 占位，正式类型需在 RFC 中登记后替换。
+  type: apiKey
+
+mapping:
+  # 视频源为核心抽象；锐明用 device.uniqueId 标识设备。
+  videoSourceId: uniqueId
+  mineId: tenantId
+  vehicleId: vehicleId
+  channelId: channel
+
+capabilities:
+  live: true
+  playback: true
+  # 锐明仅提供实时 GPS 推送与里程查询，没有历史轨迹查询，暂不声明。
+  track: false
+  alarm: true
+  analysis: false
+
+# 说明：
+# 1. 锐明的 snapshot、video clips、blackbox、fuel、driver 等能力存在，
+#    但 V0.1 尚未登记对应能力开关，暂不在 manifest 中声明。
+# 2. 不支持的能力登记、接口与字段差异见同目录 README.md。
