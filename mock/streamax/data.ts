@@ -8,6 +8,12 @@
 /** 固定 mock token，仅用于预研自测，不具备任何真实鉴权能力。 */
 export const MOCK_TOKEN = "TEST-MOCK-TOKEN";
 
+/** 固定 mock 账号，仅用于换取 token。 */
+export const MOCK_ACCOUNT = "TEST-ACCOUNT";
+
+/** 固定 mock secret，仅用于换取 token，是明显的假值。 */
+export const MOCK_SECRET = "TEST-MOCK-SECRET";
+
 /** 合成租户号。 */
 export const MOCK_TENANT_ID = "100001";
 
@@ -47,7 +53,8 @@ export const MOCK_DEVICES: MockDevice[] = [
     uniqueId: "TEST00000002",
     fleetId: "TEST-FLEET-0001",
     onlineState: "OFFLINE",
-    dormantState: "ASLEEP",
+    // 锐明 2.7.3-P3 仅允许 AWAKE / DORMANT / UNKNOWN，不得回退为 ASLEEP。
+    dormantState: "DORMANT",
     channels: "1",
     deviceType: "TEST-DEVICE",
     lanWan: "PUBLIC_NETWORK",
@@ -75,6 +82,15 @@ export interface MockAlarm {
   realFlag: number;
 }
 
+/** 以当前时间为基准生成合成告警时间窗，确保默认“最近 24 小时”查询可命中。 */
+function syntheticAlarmWindow(hoursAgo: number, durationMinutes: number): { startTime: string; endTime: string } {
+  const startMs = Date.now() - hoursAgo * 60 * 60 * 1000;
+  return {
+    startTime: new Date(startMs).toISOString(),
+    endTime: new Date(startMs + durationMinutes * 60 * 1000).toISOString(),
+  };
+}
+
 /** 合成告警：覆盖两台设备，用于验证分页与证据链接。 */
 export const MOCK_ALARMS: MockAlarm[] = [
   {
@@ -83,8 +99,7 @@ export const MOCK_ALARMS: MockAlarm[] = [
     vehicleId: "TEST-VEHICLE-0001",
     vehicleNumber: "TEST-VEHICLE-01",
     alarmType: 56002,
-    startTime: "2026-11-18T08:00:00Z",
-    endTime: "2026-11-18T08:01:00Z",
+    ...syntheticAlarmWindow(3, 1),
     processStatus: "UNPROCESSED",
     realFlag: 1,
   },
@@ -94,8 +109,7 @@ export const MOCK_ALARMS: MockAlarm[] = [
     vehicleId: "TEST-VEHICLE-0002",
     vehicleNumber: "TEST-VEHICLE-02",
     alarmType: 56003,
-    startTime: "2026-11-18T09:00:00Z",
-    endTime: "2026-11-18T09:02:00Z",
+    ...syntheticAlarmWindow(2, 2),
     processStatus: "PROCESSED",
     realFlag: 1,
   },
@@ -105,8 +119,7 @@ export const MOCK_ALARMS: MockAlarm[] = [
     vehicleId: "TEST-VEHICLE-0001",
     vehicleNumber: "TEST-VEHICLE-01",
     alarmType: 56002,
-    startTime: "2026-11-18T10:00:00Z",
-    endTime: "2026-11-18T10:01:30Z",
+    ...syntheticAlarmWindow(1, 1.5),
     processStatus: "UNPROCESSED",
     realFlag: 0,
   },

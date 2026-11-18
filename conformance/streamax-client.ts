@@ -61,6 +61,13 @@ export interface StreamaxRequestOptions {
   timeoutMs?: number;
 }
 
+/** 客户端级鉴权配置：token 优先，其次 sign + tenantId。 */
+export interface StreamaxAuthOptions {
+  token?: string;
+  sign?: string;
+  tenantId?: string;
+}
+
 export interface StreamaxResponse {
   status: number;
   body: unknown;
@@ -71,9 +78,11 @@ export interface StreamaxResponse {
 /** 锐明 mock / 网关的最小 HTTP 客户端。 */
 export class StreamaxClient {
   private readonly baseUrl: string;
+  private readonly auth: StreamaxAuthOptions;
 
-  constructor(baseUrl: string) {
+  constructor(baseUrl: string, auth: StreamaxAuthOptions = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.auth = auth;
   }
 
   async request(path: string, options: StreamaxRequestOptions): Promise<StreamaxResponse> {
@@ -81,8 +90,16 @@ export class StreamaxClient {
       accept: "application/json",
       "x-request-id": options.requestId,
     };
-    if (options.token !== undefined && options.token !== "") {
-      headers.token = options.token;
+
+    // 单次请求显式传入 token 时优先使用；否则按客户端鉴权配置选择 token 或 Sign。
+    const perRequestToken = options.token !== undefined && options.token !== "" ? options.token : undefined;
+    if (perRequestToken !== undefined) {
+      headers.token = perRequestToken;
+    } else if (this.auth.sign !== undefined && this.auth.sign !== "" && this.auth.tenantId !== undefined && this.auth.tenantId !== "") {
+      headers._sign = this.auth.sign;
+      headers._tenantid = this.auth.tenantId;
+    } else if (this.auth.token !== undefined && this.auth.token !== "") {
+      headers.token = this.auth.token;
     }
 
     let body: string | undefined;
