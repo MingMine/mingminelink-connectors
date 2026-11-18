@@ -42,7 +42,7 @@ export interface ConformanceReport {
   schemaVersion: 1;
   provider: string;
   baseUrl: string;
-  mode: "pre-research-mock";
+  mode: "pre-research-mock" | "pre-research-real";
   startedAt: string;
   finishedAt: string;
   summary: { total: number; passed: number; failed: number };
@@ -109,19 +109,30 @@ export function resolveAuth(baseUrl: string, auth: ConformanceAuthOptions = {}):
   );
 }
 
-/** 解析告警查询时间窗；默认最近 24 小时，显式参数必须是可解析的 RFC3339。 */
+/** RFC3339：必须包含日期、时间与时区（Z 或 ±HH:MM）。 */
+const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/** 解析显式 RFC3339 时间；格式或数值非法时抛错。 */
+function parseRfc3339(value: string, flag: string): number {
+  if (!RFC3339_PATTERN.test(value)) {
+    throw new Error(
+      `非法的 ${flag}：${value}（必须是含时间与时区的 RFC3339，如 2026-11-18T08:00:00Z）`,
+    );
+  }
+  const ms = Date.parse(value);
+  if (Number.isNaN(ms)) {
+    throw new Error(`非法的 ${flag}：${value}`);
+  }
+  return ms;
+}
+
+/** 解析告警与回放查询时间窗；默认最近 24 小时，显式参数必须是 RFC3339。 */
 export function resolveTimeWindow(
   startTime?: string,
   endTime?: string,
 ): { start: string; end: string } {
-  const endMs = endTime === undefined ? Date.now() : Date.parse(endTime);
-  if (Number.isNaN(endMs)) {
-    throw new Error(`非法的 --end-time：${String(endTime)}`);
-  }
-  const startMs = startTime === undefined ? endMs - 24 * 60 * 60 * 1000 : Date.parse(startTime);
-  if (Number.isNaN(startMs)) {
-    throw new Error(`非法的 --start-time：${String(startTime)}`);
-  }
+  const endMs = endTime === undefined ? Date.now() : parseRfc3339(endTime, "--end-time");
+  const startMs = startTime === undefined ? endMs - 24 * 60 * 60 * 1000 : parseRfc3339(startTime, "--start-time");
   if (startMs >= endMs) {
     throw new Error("--start-time 必须早于 --end-time");
   }
@@ -272,7 +283,7 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
   const call = async (
     checkId: string,
     path: string,
-    init: { method?: "GET" | "POST"; body?: unknown; token?: string } = {},
+    init: { method?: "GET" | "POST"; body?: unknown; token?: string; sign?: string; tenantId?: string } = {},
   ): Promise<StreamaxResponse> => {
     const requestId = `conf-${checkId}-${++sequence}`;
     lastRequestId = requestId;
@@ -280,6 +291,8 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
       method: init.method,
       body: init.body,
       token: init.token ?? ctx.token,
+      sign: init.sign,
+      tenantId: init.tenantId,
       requestId,
     });
     lastRequestId = response.requestId;
@@ -426,11 +439,10 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
     const device = ctx.devices[0];
     assert(device !== undefined, "缺少设备，无法申请回放地址");
     assert(ctx.channel > 0, "缺少通道号，无法申请回放地址");
-    const startTime = encodeURIComponent("2026-11-18T08:00:00Z");
-    const endTime = encodeURIComponent("2026-11-18T08:05:00Z");
+    // 回放与告警复用同一查询时间窗，避免写死日期。
     const response = await call(
       "playback.links",
-      `/openapi/v2/devices/${encodeURIComponent(device.uniqueId)}/playback-links?channels=${ctx.channel}&startTime=${startTime}&endTime=${endTime}&storeType=MAIN_STORAGE&streamingProtocol=FLV`,
+      `/openapi/v2/devices/${encodeURIComponent(device.uniqueId)}/playback-links?channels=${ctx.channel}&startTime=${startParam}&endTime=${endParam}&storeType=MAIN_STORAGE&streamingProtocol=FLV`,
     );
     expectOk(response, "回放地址");
     const links = asArray(asRecord(response.body)?.data)
@@ -501,16 +513,20 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
     return `已关闭会话 ${ctx.liveSession}`;
   });
 
-  await run("auth.bad-token", "错误：非法 token", async () => {
-    const response = await call("auth.bad-token", "/openapi/v2/devices?page=1&pageSize=1", {
-      token: "TEST-INVALID-TOKEN",
-    });
-    assert(response.envelope.isError, "错误 token 未被拒绝");
+  await run("auth.bad-token", "错误：非法鉴权", async () => {
+    // 按鉴权模式构造非法凭证：token 模式发非法 token，Sign 模式发非法 _sign/_tenantid。
+    const badAuth =
+      auth.mode === "sign"
+        ? { sign: "TEST-INVALID-SIGN", tenantId: "TEST-INVALID-TENANT" }
+        : { token: "TEST-INVALID-TOKEN" };
+    const response = await call("auth.bad-token", "/openapi/v2/devices?page=1&pageSize=1", badAuth);
+    assert(response.envelope.isError, "错误鉴权未被拒绝");
+    assert(response.status === 401, `错误鉴权 HTTP 状态应为 401，实际 ${response.status}`);
     assert(
       String(response.envelope.code) === "3806",
       `错误码应为 3806，实际 ${String(response.envelope.code)}`,
     );
-    return "错误 token 被拒绝（code=3806）";
+    return "错误鉴权被拒绝（HTTP 401，code=3806）";
   });
 
   const passed = checks.filter((check) => check.status === "passed").length;
@@ -520,7 +536,7 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
     schemaVersion: 1,
     provider: options.provider,
     baseUrl: options.baseUrl,
-    mode: "pre-research-mock",
+    mode: auth.mode === "mock" ? "pre-research-mock" : "pre-research-real",
     startedAt,
     finishedAt: new Date().toISOString(),
     summary: { total: checks.length, passed, failed },
@@ -619,8 +635,8 @@ function printUsage(): void {
       "  --token        访问 token，作为 token 请求头发送（或环境变量 STREAMAX_TOKEN）",
       "  --sign         Sign 签名，与 --tenant-id 一起作为 _sign 请求头发送（或 STREAMAX_SIGN）",
       "  --tenant-id    租户号，作为 _tenantid 请求头发送（或 STREAMAX_TENANT_ID）",
-      "  --start-time   告警查询起始时间（RFC3339），默认最近 24 小时",
-      "  --end-time     告警查询结束时间（RFC3339），默认当前时间",
+      "  --start-time   告警与回放查询起始时间（RFC3339），默认最近 24 小时",
+      "  --end-time     告警与回放查询结束时间（RFC3339），默认当前时间",
       "  --report       可选，额外写入 JSON 报告文件",
       "",
       "鉴权说明：有 token 用 token 头；否则用 sign + tenant-id 的 _sign/_tenantid 头；",

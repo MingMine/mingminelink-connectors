@@ -56,6 +56,9 @@ export interface StreamaxRequestOptions {
   method?: "GET" | "POST";
   body?: unknown;
   token?: string;
+  /** 单次请求覆盖 Sign 鉴权，用于验证非法签名被拒绝。 */
+  sign?: string;
+  tenantId?: string;
   /** 每个用例生成一个请求 ID，便于失败定位。 */
   requestId: string;
   timeoutMs?: number;
@@ -91,10 +94,17 @@ export class StreamaxClient {
       "x-request-id": options.requestId,
     };
 
-    // 单次请求显式传入 token 时优先使用；否则按客户端鉴权配置选择 token 或 Sign。
+    // 单次请求显式传入的鉴权优先；否则按客户端鉴权配置选择 token 或 Sign。
     const perRequestToken = options.token !== undefined && options.token !== "" ? options.token : undefined;
+    const perRequestSign =
+      options.sign !== undefined && options.sign !== "" && options.tenantId !== undefined && options.tenantId !== ""
+        ? { sign: options.sign, tenantId: options.tenantId }
+        : undefined;
     if (perRequestToken !== undefined) {
       headers.token = perRequestToken;
+    } else if (perRequestSign !== undefined) {
+      headers._sign = perRequestSign.sign;
+      headers._tenantid = perRequestSign.tenantId;
     } else if (this.auth.sign !== undefined && this.auth.sign !== "" && this.auth.tenantId !== undefined && this.auth.tenantId !== "") {
       headers._sign = this.auth.sign;
       headers._tenantid = this.auth.tenantId;
